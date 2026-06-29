@@ -7,23 +7,30 @@ import { analyzeWithPuter, fallbackAnalysis, fallbackInterviewQuestion, generate
 import { calculateAssessment, mergeAiAnalysis } from "@/lib/cbti";
 import type { AiAnalysis, AiInterviewTurn, AssessmentAnswer, ProfileDraft } from "@/lib/types";
 import { ScoreBars } from "@/components/ScoreBars";
-import { TrainingWorkspace } from "@/components/TrainingWorkspace";
+import { TrainingSummary, TrainingWorkspace } from "@/components/TrainingWorkspace";
 
 export function AssessmentWorkspace() {
   const [profile, setProfile] = useState<ProfileDraft>({ realName: "", rank: "", unit: "" });
-  const [phase, setPhase] = useState<"profile" | "assessment" | "interview" | "report" | "training">("profile");
+  const [phase, setPhase] = useState<"profile" | "assessment" | "interview" | "report" | "training" | "reassessment" | "comparison">("profile");
   const [answers, setAnswers] = useState<AssessmentAnswer[]>([]);
+  const [reassessmentAnswers, setReassessmentAnswers] = useState<AssessmentAnswer[]>([]);
   const [startedAt, setStartedAt] = useState(Date.now());
   const [turns, setTurns] = useState<AiInterviewTurn[]>([]);
   const [draftAnswer, setDraftAnswer] = useState("");
   const [analysis, setAnalysis] = useState<AiAnalysis>();
+  const [trainingSummary, setTrainingSummary] = useState<TrainingSummary>();
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [currentQuestion, setCurrentQuestion] = useState("");
   const [isQuestionLoading, setIsQuestionLoading] = useState(false);
   const [questionSource, setQuestionSource] = useState<"ai" | "fallback">("ai");
 
-  const currentScenario = SCENARIOS[answers.length];
+  const activeAnswers = phase === "reassessment" ? reassessmentAnswers : answers;
+  const currentScenario = SCENARIOS[activeAnswers.length];
   const result = useMemo(() => (answers.length === SCENARIOS.length ? calculateAssessment(answers) : undefined), [answers]);
+  const reassessmentResult = useMemo(
+    () => (reassessmentAnswers.length === SCENARIOS.length ? calculateAssessment(reassessmentAnswers) : undefined),
+    [reassessmentAnswers]
+  );
   const report = result ? mergeAiAnalysis(result, analysis) : undefined;
 
   useEffect(() => {
@@ -32,14 +39,20 @@ export function AssessmentWorkspace() {
   }, [phase, result, currentQuestion, turns]);
 
   function choose(choiceId: string) {
-    setAnswers((value) => [
-      ...value,
-      {
-        scenarioId: currentScenario.id,
-        choiceId,
-        responseTimeMs: Date.now() - startedAt
-      }
-    ]);
+    const answer = {
+      scenarioId: currentScenario.id,
+      choiceId,
+      responseTimeMs: Date.now() - startedAt
+    };
+
+    if (phase === "reassessment") {
+      setReassessmentAnswers((value) => [...value, answer]);
+      setStartedAt(Date.now());
+      if (reassessmentAnswers.length + 1 === SCENARIOS.length) setPhase("comparison");
+      return;
+    }
+
+    setAnswers((value) => [...value, answer]);
     setStartedAt(Date.now());
     if (answers.length + 1 === SCENARIOS.length) setPhase("interview");
   }
@@ -97,7 +110,9 @@ export function AssessmentWorkspace() {
           <Status label="프로필" active={phase === "profile"} done={profile.realName.length > 1} />
           <Status label="진단" active={phase === "assessment"} done={answers.length === SCENARIOS.length} />
           <Status label="AI 문답" active={phase === "interview"} done={Boolean(analysis)} />
-          <Status label="훈련" active={phase === "training"} done={false} />
+          <Status label="훈련" active={phase === "training"} done={Boolean(trainingSummary?.passed)} />
+          <Status label="재진단" active={phase === "reassessment"} done={Boolean(reassessmentResult)} />
+          <Status label="비교" active={phase === "comparison"} done={phase === "comparison"} />
         </div>
         <div className="mt-5 rounded-md bg-white p-4 text-sm leading-6 text-gray-700">
           <p className="font-bold text-ink">운영 설계 원칙</p>
@@ -127,13 +142,13 @@ export function AssessmentWorkspace() {
         </section>
       )}
 
-      {phase === "assessment" && currentScenario && (
+      {(phase === "assessment" || phase === "reassessment") && currentScenario && (
         <section className="grid gap-5 lg:grid-cols-[1fr_360px]">
           <div className="phone-shell rounded-[2rem] p-3">
             <div className="rounded-[1.5rem] bg-[#f8fafc] p-4">
               <div className="mb-3 flex items-center justify-between text-xs font-bold text-gray-500">
                 <span>{profile.rank} {profile.realName}</span>
-                <span>{answers.length + 1}/{SCENARIOS.length}</span>
+                <span>{phase === "reassessment" ? "재진단" : "초기 진단"} {activeAnswers.length + 1}/{SCENARIOS.length}</span>
               </div>
               <div className="rounded-md border border-gray-200 bg-white p-4">
                 <p className="text-xs font-bold text-signal">{currentScenario.sourceLabel}</p>
@@ -231,7 +246,35 @@ export function AssessmentWorkspace() {
         </section>
       )}
 
-      {phase === "training" && <TrainingWorkspace />}
+      {phase === "training" && (
+        <TrainingWorkspace
+          onPassed={(summary) => {
+            setTrainingSummary(summary);
+            setReassessmentAnswers([]);
+            setStartedAt(Date.now());
+            setPhase("reassessment");
+          }}
+        />
+      )}
+
+      {phase === "comparison" && result && reassessmentResult && (
+        <ComparisonView
+          before={result}
+          after={reassessmentResult}
+          trainingSummary={trainingSummary}
+          onRestart={() => {
+            setAnswers([]);
+            setReassessmentAnswers([]);
+            setTurns([]);
+            setDraftAnswer("");
+            setAnalysis(undefined);
+            setTrainingSummary(undefined);
+            setCurrentQuestion("");
+            setPhase("assessment");
+            setStartedAt(Date.now());
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -270,6 +313,128 @@ function ReportBlock({ title, items }: { title: string; items: string[] }) {
           <div key={item} className="rounded-md border border-gray-200 bg-white p-3 text-sm leading-6 text-gray-700">{item}</div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function ComparisonView({
+  before,
+  after,
+  trainingSummary,
+  onRestart
+}: {
+  before: NonNullable<ReturnType<typeof calculateAssessment>>;
+  after: NonNullable<ReturnType<typeof calculateAssessment>>;
+  trainingSummary?: TrainingSummary;
+  onRestart: () => void;
+}) {
+  const rows = [
+    axisCompare("정보처리", "V 검증 / A 수용", before.axes.information, after.axes.information),
+    axisCompare("감정반응", "S 안정 / R 동요", before.axes.emotion, after.axes.emotion),
+    axisCompare("행동순위", "M 임무 / P 개인", before.axes.priority, after.axes.priority),
+    axisCompare("대응방식", "C 대응 / W 회피", before.axes.action, after.axes.action)
+  ];
+  const improved = rows.filter((row) => row.delta > 0);
+  const worsened = rows.filter((row) => row.delta < 0);
+
+  return (
+    <section className="screen-panel rounded-lg p-5">
+      <Header icon={<ClipboardCheck />} eyebrow="Growth Report" title="훈련 전후 재진단 비교" />
+      <div className="mt-5 grid gap-3 md:grid-cols-4">
+        <CompareMetric label="초기 유형" value={`${before.code} ${before.typeName}`} />
+        <CompareMetric label="재진단 유형" value={`${after.code} ${after.typeName}`} />
+        <CompareMetric label="훈련 정확도" value={trainingSummary ? `${trainingSummary.accuracy}%` : "-"} />
+        <CompareMetric label="개선 축" value={`${improved.length}개`} />
+      </div>
+
+      <div className="mt-5 overflow-x-auto rounded-md border border-gray-200 bg-white">
+        <table className="w-full min-w-[760px] border-collapse text-sm">
+          <thead className="bg-gray-50 text-left text-xs font-black uppercase tracking-[0.12em] text-gray-500">
+            <tr>
+              <th className="border-b border-gray-200 px-4 py-3">영역</th>
+              <th className="border-b border-gray-200 px-4 py-3">기준</th>
+              <th className="border-b border-gray-200 px-4 py-3">훈련 전</th>
+              <th className="border-b border-gray-200 px-4 py-3">재진단</th>
+              <th className="border-b border-gray-200 px-4 py-3">변화</th>
+              <th className="border-b border-gray-200 px-4 py-3">해석</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.label}>
+                <td className="border-b border-gray-100 px-4 py-3 font-bold text-ink">{row.label}</td>
+                <td className="border-b border-gray-100 px-4 py-3 text-gray-600">{row.rule}</td>
+                <td className="border-b border-gray-100 px-4 py-3">{row.before}</td>
+                <td className="border-b border-gray-100 px-4 py-3">{row.after}</td>
+                <td className={`border-b border-gray-100 px-4 py-3 font-black ${row.delta > 0 ? "text-field" : row.delta < 0 ? "text-alert" : "text-gray-500"}`}>
+                  {row.delta > 0 ? `+${row.delta}` : row.delta}
+                </td>
+                <td className="border-b border-gray-100 px-4 py-3 text-gray-700">{row.message}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="mt-5 grid gap-3 md:grid-cols-2">
+        <div className="rounded-md border border-gray-200 bg-white p-4">
+          <p className="font-black text-field">개선 확인</p>
+          <div className="mt-2 grid gap-2">
+            {(improved.length ? improved : rows.filter((row) => row.delta === 0)).map((row) => (
+              <p key={row.label} className="text-sm leading-6 text-gray-700">
+                {row.label}: {row.delta > 0 ? row.message : "유지되었습니다. 다음 훈련에서 추가 개선을 확인하세요."}
+              </p>
+            ))}
+          </div>
+        </div>
+        <div className="rounded-md border border-gray-200 bg-white p-4">
+          <p className="font-black text-alert">추가 보강</p>
+          <div className="mt-2 grid gap-2">
+            {(worsened.length ? worsened : rows.filter((row) => row.delta <= 0).slice(0, 2)).map((row) => (
+              <p key={row.label} className="text-sm leading-6 text-gray-700">
+                {row.label}: {row.delta < 0 ? row.message : "아직 뚜렷한 상승은 없으므로 변형 시나리오 훈련이 필요합니다."}
+              </p>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <button className="mt-5 rounded-md bg-field px-4 py-2 font-semibold text-white" onClick={onRestart}>
+        새 진단 시작
+      </button>
+    </section>
+  );
+}
+
+function axisCompare(
+  label: string,
+  rule: string,
+  before: NonNullable<ReturnType<typeof calculateAssessment>>["axes"]["information"],
+  after: NonNullable<ReturnType<typeof calculateAssessment>>["axes"]["information"]
+) {
+  const beforeStrength = before.leftScore - before.rightScore;
+  const afterStrength = after.leftScore - after.rightScore;
+  const delta = afterStrength - beforeStrength;
+  return {
+    label,
+    rule,
+    before: `${before.selected} (${before.leftScore}:${before.rightScore})`,
+    after: `${after.selected} (${after.leftScore}:${after.rightScore})`,
+    delta,
+    message:
+      delta > 0
+        ? "취약 방향보다 대응 방향 점수가 상승했습니다."
+        : delta < 0
+          ? "재진단에서 취약 방향 반응이 늘었습니다."
+          : "점수 변화가 없어 추가 반복 훈련이 필요합니다."
+  };
+}
+
+function CompareMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md border border-gray-200 bg-white p-4">
+      <p className="text-xs font-bold text-gray-500">{label}</p>
+      <p className="mt-1 text-lg font-black text-ink">{value}</p>
     </div>
   );
 }
